@@ -1,0 +1,292 @@
+```
+title: "Affymetrix Microarray Minimal pipeline"
+author: "Simon Tomlinson 10/02/2021"
+output: html_document
+```
+# Affymetrix Microarray Analysis Basic (Skeleton) Workflow 
+##Load the required libraries & load the files for the workflow
+```{r libload, echo=TRUE}
+library(limma)
+library(affy)
+library(annotate)
+library(mouse4302.db)# load chip-specific annotation
+#install.packages("scatterplot3d",repo="http://cran.ma.imperia#l.ac.uk")
+#Then load the library
+library(scatterplot3d)
+```
+
+## Load the main data- commented code is just for information
+```{r dataload, echo=TRUE}
+# Load the target file into an AnnotatedDataFrame object
+adf<-read.AnnotatedDataFrame("targets2.txt",header=TRUE,row.names=1,as.is=TRUE)
+targets2<-read.table("targets2.txt",header=TRUE,as.is=TRUE)
+row.names(targets2)<-targets2$Name
+# Load the expression values of all the CEL files in the targets file
+mydata <- ReadAffy(filenames = targets2$Filename)
+# View a summary of the example data
+sampleNames(mydata)
+#Note that the sample order has changed to match the order specified in #targets2$Filename.
+#The data is no longer alphabetical sorted by Filename!
+# View a summary of the example data
+mydata
+```
+## Build Quality Control Plots
+```{r qc_plots1, echo=FALSE}
+# Quality control plots
+png("Bhist_before.png")
+hist(mydata)
+dev.off()
+
+library(simpleaffy)
+#data is an AffyBatch eg generated using ReadAffy
+X.mas<-call.exprs(mydata,"mas5")
+qcs<-qc(mydata,X.mas)
+png("Bqc.png")
+plot(qcs)
+dev.off()
+
+# And a boxplot with different colour per sample group
+png("Bbox_before.png")
+boxplot(mydata, col=targets2$Colour, las=2,names=targets2$Name,ylab="Log intensity",main="boxplot_before")
+dev.off()
+```
+## Normalise the data using RMA
+```{r normalise, echo=FALSE}
+# Normalise the data using RMA
+eset <- rma(mydata)
+eset
+# To obtain a matrix of the expression values, use exprs() 
+values <- exprs(eset)
+# Boxplot to observe the results of normalisation
+# Notice differences with the boxplot from the raw data
+png("Bbox_after.png")
+boxplot(values, col=targets2$Colour,las=2,names=targets2$Name,ylab="Log intensity",main="boxplot_after")
+dev.off()
+```
+
+## Plot Normalised Data
+```{r plot_normalised, echo=FALSE}
+# MA plot of the samples 
+png("Bmvapairs1norm_normalised.png")
+mva.pairs(values)
+dev.off()
+# The same plot for the non-normalised raw data
+# Note that the mva.pairs call below only plots a few of the  #samples – you may wish to plot them all but this is slow
+png("Bmvapairs1unnorm_non-normalised.png")
+mva.pairs(pm(mydata))
+dev.off()
+
+```
+## Plot Heatmap
+```{r heatmap_normalised, echo=FALSE}
+# To facilitate interpretation, let’s replace the columns # # header,currently
+# displaying the filename, to show the name of each sample 
+# (if you have a targets file)
+colnames(values) <- rownames(pData(adf))
+# Performs hierarchical clustering with average linkage based on
+# Pearson’s Correlation Coefficient
+hc<-hclust(as.dist(1-cor(values, method="pearson")), method="average")
+png("Bhclust1.png")
+plot(hc)
+dev.off()
+```
+## Perform PCA
+```{r pca_normalised, echo=FALSE}
+# Perform PCA
+values <- values + rnorm(values,mean=0, sd=0.1)
+pca <- prcomp(t(values), scale=T)
+# Plot the PCA results
+png("scatter3D.png")
+s3d<-scatterplot3d(pca$x[,1:3], pch=19, color=rainbow(1))
+s3d.coords <- s3d$xyz.convert(pca$x[,1:3])
+text(s3d.coords$x, s3d.coords$y, labels = colnames(values),pos = 3,offset = 0.5)
+dev.off()
+```
+
+## Perform fold filtering
+```{r fold_filtering, echo=TRUE}
+#obtaining a matrix of expression values
+exprsvals <- exprs(eset)
+write.csv(exprsvals,file="exprsvals.csv", quote=F)
+#RMA outputs log2 data while MAS5 outputs linear data
+#To convert from log…
+exprsvals10 <-2^exprsvals
+#check conversion
+exprsvals[1:10,]
+#converted
+exprsvals10[1:10,]
+```
+
+```{r fold_filtering, echo=TRUE}
+#More fold filtering
+#check order of sample names
+mysamples <- sampleNames(eset)
+#display the list
+mysamples
+#it is useful to obtain a vector of ProbeIDs here
+probesets <- probeNames(mydata)
+#display the first 10 ProbeSets
+probesets[1:10]
+```
+
+```{r fold_filtering, echo=TRUE}
+#Build final fold table
+#Calculate the means
+#Note mean of the log is not the same as the log of the mean!!
+control.mean <- apply(exprsvals10[,c("GSM4423390_NCOR1-LYN_-_1_.CEL", "GSM4423391_NCOR1-LYN_-_2_.CEL","GSM4423392_NCOR1-LYN_-_3_.CEL")],1,mean)
+case.mean <- apply(exprsvals10[,c("GSM4423393_NCOR1-LYN_+_1_.CEL", "GSM4423394_NCOR1-LYN_+_2_.CEL","GSM4423395_NCOR1-LYN_+_3_.CEL")],1,mean)
+#calculate some fold changes
+control_case <- control.mean/case.mean
+```
+
+```{r fold_filtering, echo=TRUE}
+#build a summary table to hold all the data
+all.data= cbind(control.mean,case.mean,control_case)
+#Descending order
+new.all.data=all.data[order(all.data[,3],decreasing=T),]
+new.all.data[1:10]
+#check the column names
+colnames(all.data)
+#write the table of means as an output
+write.table(all.data,file="group_means.txt", quote=F,sep="\t",col.names=NA)
+write.csv(all.data,file="group_means.csv", quote=F)
+```
+
+## Beginning statistical analysis
+```{r limma_stats, echo=TRUE}
+#Check original sample order
+sampleNames(eset)
+#Rename the samples
+sampleNames(eset) <-c("B-1","B-2","B-3","B+1","B+2","B+3")
+#Check the samples have renamed
+sampleNames(eset)
+```
+
+```{r building_annotation, echo=TRUE}
+##Building annotation for differential gene identification
+#establish annotation for MOE430v2
+#which annotation do we need
+#modified from #http://gettinggeneticsdone.blogspot.co.uk/2012/01/annotating-limma-#results-with-gene.html
+eset@annotation
+#packages in the annotation package
+#load chip-specific annotation
+ls("package:mouse4302.db")
+#build an annotation table
+ID <- featureNames(eset)
+Symbol <- getSYMBOL(ID, "mouse4302.db")
+Name <- as.character(lookUp(ID, "mouse4302.db", "GENENAME"))
+tmp <- data.frame(ID=ID, Symbol=Symbol, Name=Name, stringsAsFactors=F)
+tmp[tmp=="NA"] <- NA #fix padding with NA characters 
+#assign as feature data of the current Eset
+fData(eset) <- tmp
+```
+
+## Statistical analysis using Limma
+```{r limma_statistical_analysis, echo=TRUE}
+#Build the design matrix
+design <- model.matrix(~-1+factor(c(1,1,1,2,2,2)))
+colnames(design) <- c("control","case")
+#Check it makes sense
+sampleNames(eset)
+#output the design matrix
+design
+```
+
+```{r limma_statistical_analysis, echo=TRUE}
+#This instructs Limma which comparisons to make
+contrastmatrix <- makeContrasts(control-case,levels=design)
+contrastmatrix
+
+#issue these commands to fit the model
+#and make the contrasts
+fit <- lmFit(eset, design)
+fit2 <- contrasts.fit(fit, contrastmatrix)
+#this last part essentially moderates the t-statistic using 
+#the borrowed variance approach described in class
+fit2 <- eBayes(fit2)
+
+#get the results
+topTable(fit2,coef=1,adjust="fdr")
+myresults <-topTable(fit2,coef=1, adjust="fdr", number=nrow(eset))
+write.table(myresults,"myresults.txt")
+
+#make a venn diagram
+clas <- classifyTestsF(fit2)
+vennDiagram(clas)
+```
+
+```{r limma_statistical_analysis, echo=TRUE}
+#make volvano page
+dim(myresults)
+require(EnhancedVolcano)
+#Make a picture
+png("volcano.png")
+#https://www.rdocumentation.org/packages/EnhancedVolcano/versions/1.11.3/topics/EnhancedVolcano
+EnhancedVolcano(myresults,lab = rownames(myresults),x = "logFC",y = "P.Value")
+dev.off
+```
+## Carry out Functional Enrichment analysis
+```{r functional_enrichment, echo=TRUE}
+#load("Mm.h.all.v7.1.entrez.rds")
+#But load of this type of file is not supported by all 
+#versions of R- so we use readRDS instead
+Mm.H <- readRDS("/shared_files/MSigDB/Mm.h.all.v7.1.entrez.rds") 
+#Check that you have the required objects
+ls()
+#Show the full contents of the annotation package
+ls("package:mouse4302.db")
+#Show the annotation keys in this database
+keytypes(mouse4302.db) 
+#
+#http://genomicsclass.github.io/book/pages/mapping_features.ht
+#ml
+sampleNames(eset)
+```
+## Process annotation for functional enrichment
+```{r process_annotation_for_enrichment, echo=TRUE}
+
+#Here we select from the annotation a number of keys with the primary key being PROBEID
+res <- select(mouse4302.db, keys = rownames(eset), columns = c("ENTREZID", "ENSEMBL","SYMBOL"), keytype="PROBEID")
+#View the top of the table
+head(res)
+#find the index of each row of the expression set in the #annotation object res
+idx <- match(rownames(eset), res$PROBEID)
+#Use the index to set the phenotypic data in the ExpressionSet
+fData(eset) <- res[idx, ]
+head(fData(eset), 10)
+#Find all rows that don’t have an EntrezID and remove then
+eset_t<-eset[is.na(fData(eset)$ENTREZID)==0,]
+```
+
+
+## Functional Enrichment Analysis
+```{r convert_indicex, echo=TRUE}
+
+#convert to indexes
+H.indices <- ids2indices(Mm.H,fData(eset_t)$ENTREZID)
+#Pick the most suitable enrichment analysis tool to find #enrichment signatures in the data and run this tool So:-
+
+#I just run mroast here as an example- justify the selection of this method!
+
+#if you want to run mroast
+#results <-mroast(eset_t,index=H.indices,design=design,contrast=contrastmatrix[,1],adjust.method = "BH")
+#if you want to run camera
+#results <-camera(eset_t,index=H.indices,design=design,contrast=contrastmatrix[,1],adjust.method = "BH")
+#if you want to run romer
+results <-romer(eset_t,index=H.indices,design=design,contrast=contrastmatrix[,1],adjust.method = "BH")
+#View the results
+results
+#Use help for other parameters. Note we might decide to use #exactly the same model as our differential gene analysis for #the enrichment analysis- in this case we can extract it from #the fit
+#sv <- squeezeVar(fit$sigma^2,df=fit$df.residual)
+
+write.table(results,"enrichment.txt",sep="\t")
+#You can then examine the results in “enrichment.txt”.  It is a text file.  It can be downloaded to view in a spreadsheet such as Excel.
+```
+
+## Session Information
+```{r session_info, echo=TRUE}
+
+sessionInfo()
+
+```
+
